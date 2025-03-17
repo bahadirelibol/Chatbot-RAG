@@ -1,155 +1,206 @@
-# çalıştırmak için : streamlit run app.py 
-
+import os
+import json
+import time
+import io
+import base64
 import streamlit as st
-import speech_recognition as sr
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from dotenv import load_dotenv
+from langchain_chroma import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import create_retrieval_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
 
-# .env dosyasını yükle
+# Ekstra kütüphaneler: Ses tanıma ve sesli cevap
+import speech_recognition as sr
+from gtts import gTTS
+
+# Kalıcı sohbet geçmişi için dosya yolu
+HISTORY_FILE = "chat_history.json"
+
+def load_chat_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except Exception as e:
+                return {"conversations": []}
+    else:
+        return {"conversations": []}
+
+def save_chat_history(history):
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+
+def record_voice():
+    """Mikrofon üzerinden ses kaydı alıp, sesi metne dönüştürür."""
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        st.info("Dinliyorum... Lütfen konuşun.")
+        audio = r.listen(source)
+    try:
+        text = r.recognize_google(audio, language="tr-TR")
+        st.success("Ses tanımlandı: " + text)
+        return text
+    except Exception as e:
+        st.error("Ses tanıma başarısız oldu: " + str(e))
+        return None
+
+def speak_text(text):
+    """Metni sesli yanıt olarak otomatik oynatır."""
+    tts = gTTS(text=text, lang='tr')
+    fp = io.BytesIO()
+    tts.write_to_fp(fp)
+    fp.seek(0)
+    audio_bytes = fp.getvalue()
+    audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+    audio_html = f'''
+    <audio controls autoplay style="display:none;">
+        <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+    </audio>
+    '''
+    st.markdown(audio_html, unsafe_allow_html=True)
+
 load_dotenv()
 
-# Streamlit başlık
-st.title("📖 T.C. Anayasa Chatbot'u 🎤")
+st.title("Basketbol Kuralları CHATBOT 🏀")
 
-# PDF'yi ve vektör veritabanını sadece bir kez yükle
-if "vectorstore" not in st.session_state:
-    with st.spinner("📖 PDF yükleniyor ve işleniyor..."):
-        loader = PyPDFLoader("Anayasa.pdf")
-        data = loader.load()
+# Oturum başlangıcında sohbet geçmişini JSON dosyasından yüklüyoruz
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = load_chat_history()
 
-        # PDF'yi tek bir metin haline getir
-        all_text = "\n".join([page.page_content for page in data])
+# Eğer daha önce hiç sohbet oluşturulmamışsa, yeni bir sohbet oluşturuyoruz.
+if "current_chat_id" not in st.session_state:
+    if st.session_state.chat_history["conversations"]:
+        st.session_state.current_chat_id = st.session_state.chat_history["conversations"][0]["id"]
+    else:
+        new_id = str(int(time.time()))
+        new_chat = {"id": new_id, "name": f"Chat {new_id}", "messages": []}
+        st.session_state.chat_history["conversations"].append(new_chat)
+        st.session_state.current_chat_id = new_id
+        save_chat_history(st.session_state.chat_history)
 
-        # Metni chunk'lara bölme işlemi
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        docs = text_splitter.split_text(all_text)
+# Sidebar: Mevcut sohbetleri listeleyip seçim yapılmasını sağlıyoruz.
+chat_options = {chat["name"]: chat["id"] for chat in st.session_state.chat_history["conversations"]}
+selected_chat_name = st.sidebar.selectbox("Geçmiş Sohbetler", list(chat_options.keys()))
+selected_chat_id = chat_options[selected_chat_name]
 
-        # Google Gemini Embedding modelini başlat
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+if selected_chat_id != st.session_state.current_chat_id:
+    st.session_state.current_chat_id = selected_chat_id
 
-        # ChromaDB'yi başlat ve embedding işlemi yap
-        vectorstore = Chroma.from_texts(texts=docs, embedding=embeddings, persist_directory="./chroma_db")
+# Sidebar'da yeni sohbet oluşturmak için isim girme alanı
+new_chat_name = st.sidebar.text_input("Yeni sohbet adı (isteğe bağlı)", "")
 
-        # ChromaDB tekrar yükleme
-        vectorstore = Chroma(persist_directory="./chroma_db", embedding_function=embeddings)
+if st.sidebar.button("Yeni Chat Başlat"):
+    new_id = str(int(time.time()))
+    chat_name = new_chat_name if new_chat_name.strip() != "" else f"Chat {new_id}"
+    new_chat = {"id": new_id, "name": chat_name, "messages": []}
+    st.session_state.chat_history["conversations"].append(new_chat)
+    st.session_state.current_chat_id = new_id
+    save_chat_history(st.session_state.chat_history)
 
-        # Yalnızca ilk çalıştırmada yükleyelim
-        st.session_state.vectorstore = vectorstore
-
-# 📌 Retriever oluştur (benzerlik araması yapacak)
-retriever = st.session_state.vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
-
-# Google Gemini LLM'yi başlat
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-pro",
-    temperature=0.3,
-    max_tokens=500
-)
-
-# Sistem Prompt'u 
-system_prompt = (
-    "Sen, Türkiye Cumhuriyeti Anayasası hakkında soruları yanıtlayan bir asistansın. "
-    "Kullanıcıların sorularını yalnızca verilen Anayasa metni bağlamını kullanarak cevapla. "
-    "Sorunun cevabını bilmiyorsan veya verilen bağlamda cevap yoksa 'Bu konuda yardımcı olamıyorum.' de. "
-    "Cevaplarını en fazla üç cümle ile ver ve doğru bilgi içerdiğinden emin ol.\n\n"
-    "{context}"
-)
-
-# Prompt Şablonu
-prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", system_prompt),
-        ("human", "{input}")
+if st.sidebar.button("Sohbeti Sil"):
+    st.session_state.chat_history["conversations"] = [
+        chat for chat in st.session_state.chat_history["conversations"]
+        if chat["id"] != st.session_state.current_chat_id
     ]
+    if not st.session_state.chat_history["conversations"]:
+        new_id = str(int(time.time()))
+        new_chat = {"id": new_id, "name": f"Chat {new_id}", "messages": []}
+        st.session_state.chat_history["conversations"].append(new_chat)
+        st.session_state.current_chat_id = new_id
+    else:
+        st.session_state.current_chat_id = st.session_state.chat_history["conversations"][0]["id"]
+    save_chat_history(st.session_state.chat_history)
+
+# Seçilen sohbetin mesajlarını alıyoruz.
+current_chat = next(
+    (chat for chat in st.session_state.chat_history["conversations"] 
+     if chat["id"] == st.session_state.current_chat_id),
+    {"id": st.session_state.current_chat_id, "name": "Yeni Chat", "messages": []}
 )
 
-# Question-Answer zincirini oluştur
-question_answer_chain = create_stuff_documents_chain(llm, prompt)
+# Mesajları dinamik bir container içine bastırıyoruz.
+chat_container = st.container()
+with chat_container:
+    for msg in current_chat["messages"]:
+        if msg["role"] == "user":
+            st.chat_message("user").write(msg["content"])
+        else:
+            st.chat_message("assistant").write(msg["content"])
 
-# Retriever + LLM kombinasyonu ile RAG zincirini oluştur
-rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+# Sesli giriş için buton (her seferinde ses kaydı alabilmek için ayrı bir buton)
+voice_query = None
+if st.button("Sesli Soru Sor", key="voice_btn"):
+    voice_query = record_voice()
+    if voice_query:
+        current_chat["messages"].append({"role": "user", "content": voice_query})
+        save_chat_history(st.session_state.chat_history)
 
-# Sohbet geçmişini göster
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# Hem sesli hem metin tabanlı sorgu seçeneği sunuyoruz.
+if voice_query:
+    query = voice_query
+else:
+    query = st.chat_input("Bir şeyler sor veya yaz:")
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
-
-# SES ALGILAMA FONKSİYONU (Mikrofondan giriş alma)
-def recognize_speech():
-    recognizer = sr.Recognizer()
-    with sr.Microphone() as source:
-        st.info("🎤 Dinleniyor...")
-        try:
-            audio = recognizer.listen(source, timeout=5)
-            return recognizer.recognize_google(audio, language="tr-TR")
-        except:
-            return None
-
-# Mikrofon Butonunu Sabitleyen CSS
-st.markdown("""
-    <style>
-        div[data-testid="stVerticalBlock"] div:has(> div.stChatInputContainer) {
-            position: fixed;
-            bottom: 0;
-            width: 100%;
-            z-index: 100;
-            background: #1e1e1e;
-            padding: 10px;
-            display: flex;
-            justify-content: space-between;
-        }
-
-        #mic-btn {
-            background-color: #007bff;
-            color: white;
-            border: none;
-            padding: 10px;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 18px;
-            margin-right: 10px;
-        }
-
-        #mic-btn:hover {
-            background-color: #0056b3;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-# Mikrofon Butonu Sabit Konumda
-col1, col2 = st.columns([1, 8])
-with col1:
-    mic_clicked = st.button("🎤", key="mic-btn")
-
-# Kullanıcının Yazılı Girişi
-query = st.chat_input("📖 Anayasa hakkında bir soru sor:")
-
-# Eğer Mikrofon Butonuna Basılırsa Sesle Soru Sor
-if mic_clicked:
-    query = recognize_speech()
-    if query is None:
-        st.error("⚠️ Ses algılanamadı, lütfen tekrar deneyin.")
-
-# Eğer Kullanıcıdan Giriş Varsa Chatbota Gönder
 if query:
-    st.session_state.messages.append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.write(query)
+    # Eğer sorgu daha önceden eklenmemişse, kullanıcı mesajını ekliyoruz ve kaydediyoruz.
+    if not any(msg["content"] == query for msg in current_chat["messages"]):
+        current_chat["messages"].append({"role": "user", "content": query})
+        save_chat_history(st.session_state.chat_history)
 
-    with st.spinner("Yanıt hazırlanıyor..."):
-        response = rag_chain.invoke({"input": query})
-        answer = response["answer"]
+    # PDF'den veri yükleme ve chatbot ayarları
+    loader = PyPDFLoader("basketbol_kural.pdf")
+    data = loader.load()
 
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        with st.chat_message("assistant"):
-            st.write(answer)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000)
+    docs = text_splitter.split_documents(data)
+
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+    vectorstore = Chroma.from_documents(documents=docs, embedding=embeddings, persist_directory="./chroma_db")
+
+    retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
+
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-1.5-pro",
+        temperature=0.3,
+        max_tokens=500
+    )
+
+    system_prompt = (
+        "Sen bir yardımcı asistansın ve yalnızca basketbol kuralları hakkında sorulara cevap veriyorsun. "
+        "Yanıtlarını yalnızca verilen bağlam içeriğinden oluştur. "
+        "Eğer sorunun cevabını bilmiyorsan, 'Bu konuda yardımcı olamıyorum.' de. "
+        "Cevaplarını en fazla üç cümle ile ver ve doğru bilgi içerdiğinden emin ol.\n\n"
+        "{context}"
+    )
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            ("human", "{input}")
+        ]
+    )
+
+    question_answer_chain = create_stuff_documents_chain(llm, prompt)
+    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+    response = rag_chain.invoke({"input": query})
+
+    # Bot cevabını ekliyoruz ve kaydediyoruz.
+    current_chat["messages"].append({"role": "assistant", "content": response["answer"]})
+    save_chat_history(st.session_state.chat_history)
+
+    # Container içindeki mesajları güncelleyelim.
+    chat_container.empty()
+    with chat_container:
+        for msg in current_chat["messages"]:
+            if msg["role"] == "user":
+                st.chat_message("user").write(msg["content"])
+            else:
+                st.chat_message("assistant").write(msg["content"])
+    
+    # Chatbot cevabını sesli olarak otomatik oynatıyoruz.
+    speak_text(response["answer"])
