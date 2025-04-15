@@ -306,7 +306,7 @@ function renderSessionMessages(messages) {
   });
 }
 
-// --- SES TANIMA VE "Asistan" TETİKLEME --- 
+// --- SES TANIMA VE "Akif" TETİKLEME --- 
 
 document.addEventListener("DOMContentLoaded", () => {
   const voiceBtn = document.getElementById("voice-btn");
@@ -330,9 +330,9 @@ document.addEventListener("DOMContentLoaded", () => {
       event.results[event.results.length - 1][0].transcript.toLowerCase();
     console.log("🎤 Algılanan kelime:", transcript);
 
-    if (transcript.includes("asistan") && !isListeningForQuery) {
+    if (transcript.includes("akif") && !isListeningForQuery) {
       console.log(
-        "✨ 'Asistan' kelimesi algılandı. Şimdi tam dinleme moduna geçiyoruz..."
+        "✨ 'Akif' kelimesi algılandı. Şimdi tam dinleme moduna geçiyoruz..."
       );
       isListeningForQuery = true;
       recognition.stop();

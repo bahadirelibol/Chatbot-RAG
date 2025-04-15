@@ -26,7 +26,7 @@ def load_chat_history():
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             try:
                 return json.load(f)
-            except Exception as e:
+            except Exception:
                 return {"conversations": []}
     else:
         return {"conversations": []}
@@ -93,7 +93,6 @@ if selected_chat_id != st.session_state.current_chat_id:
 
 # Sidebar'da yeni sohbet oluşturmak için isim girme alanı
 new_chat_name = st.sidebar.text_input("Yeni sohbet adı (isteğe bağlı)", "")
-
 if st.sidebar.button("Yeni Chat Başlat"):
     new_id = str(int(time.time()))
     chat_name = new_chat_name if new_chat_name.strip() != "" else f"Chat {new_id}"
@@ -123,34 +122,52 @@ current_chat = next(
     {"id": st.session_state.current_chat_id, "name": "Yeni Chat", "messages": []}
 )
 
-# Mesajları dinamik bir container içine bastırıyoruz.
+# Chat mesajlarını görüntülemek için container ve render fonksiyonu
 chat_container = st.container()
-with chat_container:
-    for msg in current_chat["messages"]:
-        if msg["role"] == "user":
-            st.chat_message("user").write(msg["content"])
-        else:
-            st.chat_message("assistant").write(msg["content"])
 
-# Sesli giriş için buton (her seferinde ses kaydı alabilmek için ayrı bir buton)
+def render_chat():
+    chat_container.empty()
+    with chat_container:
+        for msg in current_chat["messages"]:
+            if msg["role"] == "user":
+                st.chat_message("user").write(msg["content"])
+            else:
+                st.chat_message("assistant").write(msg["content"])
+
+# İlk render: Mevcut sohbet geçmişi gösteriliyor.
+render_chat()
+
+# Sesli sorgu butonu: Kullanıcı sesli soru sorduğunda, mesaj eklenir ve sohbet ekranı güncellenir.
 voice_query = None
 if st.button("Sesli Soru Sor", key="voice_btn"):
     voice_query = record_voice()
     if voice_query:
-        current_chat["messages"].append({"role": "user", "content": voice_query})
-        save_chat_history(st.session_state.chat_history)
+        # Aynı mesajı tekrar eklememek için kontrol
+        if not any(msg["content"] == voice_query for msg in current_chat["messages"]):
+            current_chat["messages"].append({"role": "user", "content": voice_query})
+            save_chat_history(st.session_state.chat_history)
+            render_chat()
 
-# Hem sesli hem metin tabanlı sorgu seçeneği sunuyoruz.
-if voice_query:
+# Metin girişi: Her zaman görünür durumda.
+text_query = st.chat_input("Bir şeyler sor veya yaz:")
+
+# Sorgu belirleme: Yazılı sorguya öncelik veriliyor.
+if text_query:
+    query = text_query
+    query_source = "text"
+elif voice_query:
     query = voice_query
+    query_source = "voice"
 else:
-    query = st.chat_input("Bir şeyler sor veya yaz:")
+    query = None
+    query_source = None
 
 if query:
-    # Eğer sorgu daha önceden eklenmemişse, kullanıcı mesajını ekliyoruz ve kaydediyoruz.
-    if not any(msg["content"] == query for msg in current_chat["messages"]):
+    # Eğer sorgu henüz eklenmediyse, ekliyoruz (yazılı sorgu için).
+    if query_source == "text" and not any(msg["content"] == query for msg in current_chat["messages"]):
         current_chat["messages"].append({"role": "user", "content": query})
         save_chat_history(st.session_state.chat_history)
+        render_chat()
 
     # PDF'den veri yükleme ve chatbot ayarları
     loader = PyPDFLoader("basketbol_kural.pdf")
@@ -161,7 +178,6 @@ if query:
 
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     vectorstore = Chroma.from_documents(documents=docs, embedding=embeddings, persist_directory="./chroma_db")
-
     retriever = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 10})
 
     llm = ChatGoogleGenerativeAI(
@@ -189,18 +205,11 @@ if query:
     rag_chain = create_retrieval_chain(retriever, question_answer_chain)
     response = rag_chain.invoke({"input": query})
 
-    # Bot cevabını ekliyoruz ve kaydediyoruz.
+    # Bot cevabını ekliyoruz
     current_chat["messages"].append({"role": "assistant", "content": response["answer"]})
     save_chat_history(st.session_state.chat_history)
+    render_chat()
 
-    # Container içindeki mesajları güncelleyelim.
-    chat_container.empty()
-    with chat_container:
-        for msg in current_chat["messages"]:
-            if msg["role"] == "user":
-                st.chat_message("user").write(msg["content"])
-            else:
-                st.chat_message("assistant").write(msg["content"])
-    
-    # Chatbot cevabını sesli olarak otomatik oynatıyoruz.
-    speak_text(response["answer"])
+    # Sadece sesli sorgu durumunda sesli oynatma
+    if query_source == "voice":
+        speak_text(response["answer"])
